@@ -1,0 +1,89 @@
+name: 🔧 Manual - TTS Guarder Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      extension:
+        description: "Extension name (required)"
+        required: true
+        type: string
+        default: "breeze_tts_python"
+      config_dir:
+        description: "Config directory (optional)"
+        required: false
+        type: string
+        default: "tests/configs"
+      branch:
+        description: "Branch to test (optional, defaults to current branch)"
+        required: false
+        type: string
+        default: ""
+      env_vars:
+        description: "Environment variable keys (semicolon separated), values read from GitHub Secrets"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  tts-guarder-test:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ten-framework/ten_agent_build:0.7.14
+
+    env:
+      _ALL_SECRETS: ${{ toJSON(secrets) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: "0"
+          submodules: "true"
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      - name: Configure git
+        run: git config --global --add safe.directory $(pwd)
+
+      - name: Setup environment
+        run: |
+          echo "EXTENSION=${{ github.event.inputs.extension }}" >> $GITHUB_ENV
+          echo "CONFIG_DIR=${{ github.event.inputs.config_dir }}" >> $GITHUB_ENV
+          echo "BRANCH=${{ github.event.inputs.branch || github.ref_name }}" >> $GITHUB_ENV
+
+      - name: Parse and set custom environment variables
+        shell: bash
+        run: |
+          ENV_INPUT="${{ github.event.inputs.env_vars }}"
+          echo "Custom environment variables:"
+          if [ -n "$ENV_INPUT" ]; then
+            IFS=';' read -ra ENV_ARRAY <<< "$ENV_INPUT"
+            for env_key in "${ENV_ARRAY[@]}"; do
+              env_key=$(echo "$env_key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+              [ -z "$env_key" ] && continue
+              if echo "$env_key" | grep -q '^[A-Za-z_][A-Za-z0-9_]*$'; then
+                secret_value=$(echo "$_ALL_SECRETS" | jq -r --arg key "$env_key" '.[$key] // empty')
+                if [ -n "$secret_value" ] && [ "$secret_value" != "null" ]; then
+                  echo "${env_key}=${secret_value}" >> $GITHUB_ENV
+                  echo "  set ${env_key}=***"
+                else
+                  echo "  missing secret ${env_key}"
+                fi
+              fi
+            done
+          fi
+
+      - name: Run TTS Guarder Test
+        run: |
+          cd ai_agents
+          task tts-guarder-test EXTENSION="${{ github.event.inputs.extension }}" CONFIG_DIR="${{ github.event.inputs.config_dir }}" -- -v
+
+      - name: Upload dump artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: breeze-guarder-dump
+          path: ai_agents/agents/ten_packages/extension/breeze_tts_python/tests/keep_dump_output/**
+          if-no-files-found: warn
